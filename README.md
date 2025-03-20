@@ -2,7 +2,7 @@ btc-arima-model
 
 Contributors :black_nib:
 :star: Ben McKinnon
-:star2: l3oxbit (Maintainer)
+:star2: l3oxbit
 
 Table Of Contents :books:
 
