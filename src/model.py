@@ -2,60 +2,60 @@
 """
 Created on Thu Jan 20 13:25:58 2022
 
-@author: l3oxbit
+Updated: 2025-03-20
+
+This script fetches cryptocurrency historical data, cleans it,
+applies a variance-stabilizing log transformation, tests for stationarity,
+and fits an ARIMA model using auto_arima.
 """
+
 import os
 import requests
 import json
 import datetime
 import pandas as pd
+import numpy as np
 from statsmodels.tsa.stattools import adfuller, kpss
 from statsmodels.graphics.tsaplots import plot_acf, plot_pacf
 import pmdarima as pm
 import matplotlib.pyplot as plt
+import warnings
 
+warnings.filterwarnings("ignore", category=UserWarning, module="statsmodels")
 
 def get_new_prices(historical_data):
-    """
-    Parameters
-    ----------
-    historical_data : DF
-        Df read from csv containing all the historical prices by day.
-    
-    Returns
-    -------
-    None
-    """
     try:
-        historical_data['Date'] = pd.to_datetime(historical_data['Date'], format='%Y/%m/%d')
+        historical_data['Date'] = pd.to_datetime(historical_data['Date'], format='%Y-%m-%d')
     except ValueError:
-        historical_data['Date'] = pd.to_datetime(historical_data['Date'], format='%d/%m/%Y')
+        historical_data['Date'] = pd.to_datetime(historical_data['Date'], format='%Y-%m-%d')
 
     max_date = historical_data['Date'].max()
     today_date = pd.to_datetime("today")
     date_difference = (today_date - max_date).days
     if date_difference > 0:
-        chosen_currency = historical_data['Currency'][0]
+        chosen_currency = historical_data['Currency'].iloc[0]
         get_historical_prices(chosen_currency, date_difference, False)
     else:
         print("No new data needed.")
 
-
 def get_historical_prices(chosen_currency, num_days, first_parse):
-    """
-    Parameters
-    ----------
-    chosen_currency : STR
-        Provide a valid cryptocurrency e.g. 'bitcoin'.
-    num_days : INT
-        Enter the number of days of history needed.
+    # Limit the number of days to 365 for free API users.
+    if num_days > 365:
+        print("Limiting the number of days to 365 for free API usage.")
+        num_days = 365
+        
+    url = f'https://api.coingecko.com/api/v3/coins/{chosen_currency}/market_chart?vs_currency=usd&days={num_days}&interval=daily'
+    response = requests.get(url)
     
-    Returns
-    -------
-    None
-    """
-    response = requests.get(f'https://api.coingecko.com/api/v3/coins/{chosen_currency}/market_chart?vs_currency=usd&days={num_days}&interval=daily')
+    if response.status_code != 200:
+        print("Error fetching data:", response.status_code, response.text)
+        return
+    
     hist_dict = response.json()
+    
+    if 'prices' not in hist_dict:
+        print("Key 'prices' not found in the API response. Response:", hist_dict)
+        return
     
     data = pd.DataFrame.from_dict(hist_dict['prices'])
     data.rename(columns={0: 'Date', 1: 'Price(USD)'}, inplace=True)
@@ -68,54 +68,16 @@ def get_historical_prices(chosen_currency, num_days, first_parse):
     else:
         data.to_csv(f'../dat/raw/{chosen_currency}_daily_historical.csv', index=False)
 
-
 def remove_duplicate_data(df):
-    """
-    Parameters
-    ----------
-    df : DataFrame
-        A dataframe where each row contains unique data for the respective currency.
-    
-    Returns
-    -------
-    df : DataFrame
-        DataFrame with no duplicate rows.
-    """
     df.drop_duplicates('Date', keep='last', inplace=True)
     df.drop_duplicates(inplace=True)
     return df
 
-
 def clean(df):
-    """
-    Parameters
-    ----------
-    df : DataFrame
-        A dataframe where each row contains unique data for the respective currency.
-    
-    Returns
-    -------
-    df : DataFrame
-        Cleaned dataframe with all preprocessing applied.
-    """
     df = remove_duplicate_data(df)
     return df
 
-
 def adf_test(target_series):
-    """
-    Parameters
-    ----------
-    target_series : Pandas Series
-        Series to test for stationarity (e.g. Bitcoin Price).
-    
-    Returns
-    -------
-    adf_statistic : Float
-        The ADF statistic.
-    p_value : Float
-        The p-value of the ADF test.
-    """
     result = adfuller(target_series)
     adf_statistic = result[0]
     p_value = result[1]
@@ -123,129 +85,106 @@ def adf_test(target_series):
     print('p-value: %f' % p_value)
     return adf_statistic, p_value
 
-
 def kpss_test(target_series):
     print("Results of KPSS Test:")
-    kpsstest = kpss(target_series, regression="ct", nlags="auto")
-    kpss_output = pd.Series(kpsstest[0:3], index=["Test Statistic", "p-value", "Lags Used"])
-    for key, value in kpsstest[3].items():
+    kpss_result = kpss(target_series, regression="ct", nlags="auto")
+    kpss_output = pd.Series(kpss_result[0:3], index=["Test Statistic", "p-value", "Lags Used"])
+    for key, value in kpss_result[3].items():
         kpss_output["Critical Value (%s)" % key] = value
     print(kpss_output)
 
-
 def find_order_of_differencing(df):
-    """
-    Parameters
-    ----------
-    df : DataFrame
-        Cleaned time series data for the currency.
+    # Apply log transformation to stabilize variance
+    log_series = np.log(df['Price(USD)'])
+    print("Testing stationarity on log-transformed data:")
+    adf_stat, p_val = adf_test(log_series)
+    kpss_test(log_series)
     
-    Returns
-    -------
-    d : INT
-        The number of differences required to make the series stationary.
-    """
-    adf_statistic, p_value = adf_test(df['Price(USD)'])
-    kpss_test(df['Price(USD)'])
     d = 0
-    while p_value > 0.05:
-        df['Price(USD)'] = df['Price(USD)'].diff()
-        df.dropna(inplace=True)
+    # Keep differencing until the ADF p-value is below 0.05
+    while p_val > 0.05:
+        log_series = log_series.diff().dropna()
         d += 1
-        adf_statistic, p_value = adf_test(df['Price(USD)'])
-        kpss_test(df['Price(USD)'])
-    print(f"Success... TS now stationary after {d} differencing")
+        print(f"\nAfter differencing {d} time(s):")
+        adf_stat, p_val = adf_test(log_series)
+        kpss_test(log_series)
+    print(f"\nSuccess... The log-transformed series is stationary after {d} differencing(s).")
     return d
 
-
-def create_acf_pacf(df):
-    """
-    Parameters
-    ----------
-    df : DataFrame
-        The differenced dataframe.
-    
-    Returns
-    -------
-    None
-    """
-    fig, ax = plt.subplots(1, figsize=(12,8), dpi=100)
-    plot_acf(df['Price(USD)'], lags=20, ax=ax)
+def create_acf_pacf(series):
+    fig, ax = plt.subplots(figsize=(12, 8), dpi=100)
+    plot_acf(series, lags=20, ax=ax)
+    plt.title("ACF Plot")
     plt.show()
 
-    fig, ax = plt.subplots(1, figsize=(12,8), dpi=100)
-    plot_pacf(df['Price(USD)'], lags=20, ax=ax)
+    fig, ax = plt.subplots(figsize=(12, 8), dpi=100)
+    plot_pacf(series, lags=20, ax=ax)
+    plt.title("PACF Plot")
     plt.show()
-
 
 def eda(df):
-    """
-    Parameters
-    ----------
-    df : DataFrame
-        Cleaned time series data for the currency.
-    
-    Returns
-    -------
-    None
-    """
     d = find_order_of_differencing(df)
-    create_acf_pacf(df)
+    # For visualization: compute the differenced log series
+    log_series = np.log(df['Price(USD)'])
+    diff_series = log_series.diff(d).dropna()
+    plt.figure(figsize=(12, 8))
+    plt.plot(diff_series)
+    plt.title(f"Log-transformed Price Series Differenced {d} time(s)")
+    plt.xlabel("Time")
+    plt.ylabel("Differenced Log(Price)")
+    plt.show()
+    create_acf_pacf(diff_series)
 
-
-def auto_arima(df):
-    """
-    Parameters
-    ----------
-    df : DataFrame
-        The original time series data.
-    
-    Returns
-    -------
-    model.order : Tuple
-        The optimal (p, d, q) values from auto ARIMA.
-    differenced_by_auto_arima : DataFrame
-        The differenced dataframe from the auto ARIMA model.
-    """
-    orig_df = np.log(df['Price(USD)'])
-    model = pm.auto_arima(orig_df, start_p=10, start_q=10, test='adf', max_p=10, max_q=10, m=1, seasonal=False, trace=True, error_action='ignore', suppress_warnings=True, stepwise=True)
-    differenced_by_auto_arima = orig_df.diff(model.order[1])
-    return model.order, differenced_by_auto_arima
-
+def auto_arima_model(df):
+    # Use the log-transformed data for model fitting
+    log_series = np.log(df['Price(USD)']).dropna()
+    model = pm.auto_arima(
+        log_series,
+        start_p=0, start_q=0,
+        test='adf',
+        max_p=5, max_q=5,
+        m=1, seasonal=False,
+        trace=True,
+        error_action='ignore',
+        suppress_warnings=True,
+        stepwise=True
+    )
+    d = model.order[1]
+    differenced_series = log_series.diff(d).dropna()
+    return model.order, differenced_series, model
 
 def main():
-    # Select cryptocurrency
     chosen_currency = 'bitcoin'
+    # Attempt to read existing historical data
     try:
         historical_data = pd.read_csv(f'../dat/raw/{chosen_currency}_daily_historical.csv')
     except FileNotFoundError:
         historical_data = pd.DataFrame()
 
-    # Fetch and clean data if necessary
     if len(historical_data) > 0:
         get_new_prices(historical_data)
     else:
         get_historical_prices(chosen_currency, 3650, True)
 
-    # Clean the data
+    # Read and clean data
     df = pd.read_csv(f'../dat/raw/{chosen_currency}_daily_historical.csv')
     df = clean(df)
-
-    # Save cleaned data
     df.to_csv(f'../dat/clean/cleaned_{chosen_currency}_daily_historical.csv', index=False)
 
-    # Perform EDA
+    # Perform exploratory data analysis on log-transformed data
     eda(df)
 
-    # Perform Auto ARIMA and save model orders
-    auto_p_d_q, differenced_by_auto_arima = auto_arima(df)
+    # Fit an ARIMA model using auto_arima on log-transformed data
+    order, diff_series, model = auto_arima_model(df)
+    print("\nAuto ARIMA model order (p, d, q):", order)
     
+    # Save model order and differenced series to files
     with open('auto_p_d_q.json', 'w') as fp:
-        json.dump(auto_p_d_q, fp)
-
-    differenced_by_auto_arima.to_csv(f'../dat/clean/differenced_auto_arima_{chosen_currency}_daily_historical.csv')
+        json.dump(order, fp)
+    diff_series.to_csv(f'../dat/clean/differenced_auto_arima_{chosen_currency}_daily_historical.csv', index=False)
 
     print("Data processing and analysis completed.")
 
 if __name__ == '__main__':
     main()
+
