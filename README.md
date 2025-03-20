@@ -66,7 +66,7 @@ Usage :shipit:
     │   ├── clean.py              <- Script to clean the raw data.
     │   ├── eda.py                <- Script for exploratory data analysis.
     │   ├── model.py              <- Original foxed ARIMA model
-    │   ├── b-g-a-model.py              <- Unified script that fits ARIMA & GARCH (with optional Boostdog) and outputs forecasts.
+    │   ├── b-g-a-model.py        <- Unified script that fits ARIMA & GARCH (with optional Boostdog) and outputs forecasts.
     │   ├── boostdog.py           <- (Optional) XGBoost-based signal generator.
     │   └── garchdog.py           <- GARCH-based modeling functions.
     ├── .gitignore.txt         <- Specifies files to ignore in version control.
